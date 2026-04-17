@@ -64,33 +64,23 @@ fraud_detection_system/
 
 ## 👥 Team Responsibilities
 
-<<<<<<< HEAD
 ### 👤 Team Member 1 : Dhruvil Pandya — Data & Database Management
-=======
-### 👤 Team Member 1 — Data & Database Management
->>>>>>> 29a82d4 (Initial commit)
 - ✅ Collection and understanding of transaction dataset
 - ✅ Data cleaning, preprocessing, and feature scaling
 - ✅ Designing and managing SQL database for transactions
 - ✅ Exploratory Data Analysis (EDA) and insights generation
 - **Deliverables:** `data_preprocessing.py`, `create_db.py`, `queries.py`
 
-<<<<<<< HEAD
+
 ### 👤 Team Member 2 : Dhyey Joshi — Machine Learning & Model Evaluation
-=======
-### 👤 Team Member 2 — Machine Learning & Model Evaluation
->>>>>>> 29a82d4 (Initial commit)
 - ✅ Selection and implementation of ML models
 - ✅ Training and tuning fraud detection models
 - ✅ Model evaluation using Precision, Recall, F1-Score, ROC-AUC
 - ✅ Saving trained models for API integration
 - **Deliverables:** `model_training.py`, trained `.pkl` model files
 
-<<<<<<< HEAD
+
 ### 👤 Team Member 3 : Kavy Modi — System Integration & Application Layer
-=======
-### 👤 Team Member 3 — System Integration & Application Layer
->>>>>>> 29a82d4 (Initial commit)
 - ✅ Developing backend logic to load ML models
 - ✅ Integrating database with prediction system
 - ✅ Building REST API for fraud risk prediction
