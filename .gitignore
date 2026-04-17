@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+venv/
+.env
+
+database/fraud_system.db
+
+*.pkl
+
+.DS_Store
+Thumbs.db

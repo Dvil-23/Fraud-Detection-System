@@ -160,3 +160,67 @@ print(f"""
 print("=" * 60)
 print("  Done. All outputs ready for submission.")
 print("=" * 60)
+<<<<<<< HEAD
+=======
+import pickle
+import pandas as pd
+import numpy as np
+import streamlit as st
+
+MODEL_PATH = "models/random_forest_model.pkl"
+SCALER_PATH = "models/scaler.pkl"
+
+@st.cache_resource
+def load_model_and_scaler():
+    with open(MODEL_PATH, "rb") as f:
+        model = pickle.load(f)
+    with open(SCALER_PATH, "rb") as f:
+        scaler = pickle.load(f)
+    return model, scaler
+
+model, scaler = load_model_and_scaler()
+
+st.markdown("## Manual Prediction")
+
+with st.form("manual_prediction_form"):
+    time_value = st.number_input("Time", value=1000.0)
+    amount_value = st.number_input("Amount", value=150.0)
+
+    v_inputs = {}
+    cols = st.columns(4)
+
+    for i in range(1, 29):
+        with cols[(i - 1) % 4]:
+            v_inputs[f"V{i}"] = st.number_input(f"V{i}", value=0.0, format="%.6f")
+
+    submitted = st.form_submit_button("Predict Fraud")
+
+if submitted:
+    data = {"Time": time_value}
+    for i in range(1, 29):
+        data[f"V{i}"] = v_inputs[f"V{i}"]
+    data["Amount"] = amount_value
+
+    feature_order = ["Time"] + [f"V{i}" for i in range(1, 29)] + ["Amount"]
+    row = pd.DataFrame([data], columns=feature_order)
+
+    scaled = scaler.transform(row[["Time", "Amount"]])
+    row = row.copy()
+    row.loc[:, "Time"] = scaled[:, 0]
+    row.loc[:, "Amount"] = scaled[:, 1]
+
+    probability = float(model.predict_proba(row)[0][1])
+    is_fraud = bool(model.predict(row)[0])
+
+    if probability < 0.3:
+        risk_level = "LOW"
+    elif probability < 0.7:
+        risk_level = "MEDIUM"
+    else:
+        risk_level = "HIGH"
+
+    st.write("### Prediction Result")
+    st.write(f"Fraud Probability: {probability:.4f}")
+    st.write(f"Is Fraud: {is_fraud}")
+    st.write(f"Risk Level: {risk_level}")
+>>>>>>> 29a82d4 (Initial commit)
