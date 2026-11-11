@@ -1,106 +1,140 @@
-<<<<<<< HEAD
-=======
+"""Train, evaluate and save the fraud-detection models.
+
+Usage (from the project root)::
+
+    python backend/train_model.py
+    python backend/train_model.py --data path/to/creditcard.csv --model-dir models
+
+Outputs (in ``models/`` by default):
+    random_forest_model.pkl, logistic_regression_model.pkl, scaler.pkl
+
+Only ``Time`` and ``Amount`` are scaled; the scaler is fitted on the training
+split only. SMOTE oversampling is applied to the training split only, and only
+when the classes are clearly imbalanced and ``imbalanced-learn`` is installed
+(the bundled dataset is ~50/50, so it is normally skipped).
+"""
+import argparse
 import os
->>>>>>> 29a82d4 (Initial commit)
-import pandas as pd
+import sys
+
 import joblib
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestClassifier
-<<<<<<< HEAD
-from imblearn.over_sampling import SMOTE
-
-print("Loading Kaggle dataset...")
-import os
-=======
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report
-from imblearn.over_sampling import SMOTE
-
-print("Loading dataset...")
->>>>>>> 29a82d4 (Initial commit)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_PATH = os.path.join(BASE_DIR, "data", "creditcard.csv")
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
-df = pd.read_csv(DATA_PATH)
-X = df.drop("Class", axis=1)
-y = df["Class"]
+from backend.feature_engineering import FEATURE_COLUMNS, SCALED_COLUMNS  # noqa: E402
 
-<<<<<<< HEAD
-# scale
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-
-# split
-X_train, X_test, y_train, y_test = train_test_split(
-    X_scaled, y, test_size=0.2, stratify=y, random_state=42
-)
-
-# handle imbalance
-smote = SMOTE()
-X_train, y_train = smote.fit_resample(X_train, y_train)
-
-# model
-model = RandomForestClassifier(n_estimators=120, max_depth=12)
-model.fit(X_train, y_train)
-
-print("Model accuracy:", model.score(X_test, y_test))
-
-# save
-MODEL_DIR = os.path.join(BASE_DIR, "models")
-os.makedirs(MODEL_DIR, exist_ok=True)
-
-joblib.dump(model, os.path.join(MODEL_DIR, "fraud_model.pkl"))
-joblib.dump(scaler, os.path.join(MODEL_DIR, "scaler.pkl"))
+DEFAULT_DATA_PATH = os.path.join(BASE_DIR, "data", "creditcard.csv")
+DEFAULT_MODEL_DIR = os.path.join(BASE_DIR, "models")
+IMBALANCE_THRESHOLD = 0.4  # apply SMOTE when the minority class is below 40%
 
 
-print("Model saved")
-=======
-# ── FIX: Only scale Time and Amount (columns 0 and 29).
-# feature_engineering.py only applies the scaler to these two columns,
-# so training must match exactly — otherwise predictions will be wrong.
-scaler = StandardScaler()
-X[["Time", "Amount"]] = scaler.fit_transform(X[["Time", "Amount"]])
+def _maybe_oversample(X_train, y_train, random_state):
+    minority_share = y_train.value_counts(normalize=True).min()
+    if minority_share >= IMBALANCE_THRESHOLD:
+        print(f"Classes are balanced enough (minority share {minority_share:.1%}); skipping SMOTE.")
+        return X_train, y_train
+    try:
+        from imblearn.over_sampling import SMOTE
+    except ImportError:
+        print("WARNING: data is imbalanced but imbalanced-learn is not installed; "
+              "training without SMOTE (pip install imbalanced-learn).")
+        return X_train, y_train
+    print(f"Minority share {minority_share:.1%}; applying SMOTE to the training split.")
+    return SMOTE(random_state=random_state).fit_resample(X_train, y_train)
 
-# Train/test split
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, stratify=y, random_state=42
-)
 
-# Handle class imbalance with SMOTE
-smote = SMOTE(random_state=42)
-X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+def evaluate(name, model, X_test, y_test):
+    pred = model.predict(X_test)
+    proba = model.predict_proba(X_test)[:, 1]
+    metrics = {
+        "accuracy": accuracy_score(y_test, pred),
+        "precision": precision_score(y_test, pred, zero_division=0),
+        "recall": recall_score(y_test, pred, zero_division=0),
+        "f1": f1_score(y_test, pred, zero_division=0),
+        "roc_auc": roc_auc_score(y_test, proba),
+    }
+    print(f"\n{name}")
+    for key, value in metrics.items():
+        print(f"  {key:<10}: {value:.4f}")
+    return metrics
 
-# ── Model 1: Random Forest
-print("\nTraining Random Forest...")
-rf_model = RandomForestClassifier(n_estimators=120, max_depth=12, random_state=42, n_jobs=-1)
-rf_model.fit(X_train_res, y_train_res)
-rf_preds = rf_model.predict(X_test)
-print(f"Random Forest Accuracy: {rf_model.score(X_test, y_test):.4f}")
-print("\nRandom Forest Classification Report:")
-print(classification_report(y_test, rf_preds, target_names=["Legitimate", "Fraud"]))
 
-# ── Model 2: Logistic Regression (promised in README/API docs)
-print("\nTraining Logistic Regression...")
-lr_model = LogisticRegression(max_iter=1000, random_state=42)
-lr_model.fit(X_train_res, y_train_res)
-lr_preds = lr_model.predict(X_test)
-print(f"Logistic Regression Accuracy: {lr_model.score(X_test, y_test):.4f}")
-print("\nLogistic Regression Classification Report:")
-print(classification_report(y_test, lr_preds, target_names=["Legitimate", "Fraud"]))
+def train(data_path=DEFAULT_DATA_PATH, model_dir=DEFAULT_MODEL_DIR,
+          n_estimators=120, random_state=42):
+    """Train both models, print test-set metrics, save artifacts, return metrics."""
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"Dataset not found: {data_path}")
 
-# ── Save models
-MODEL_DIR = os.path.join(BASE_DIR, "models")
-os.makedirs(MODEL_DIR, exist_ok=True)
+    print(f"Loading dataset: {data_path}")
+    df = pd.read_csv(data_path)
+    missing = [c for c in FEATURE_COLUMNS + ["Class"] if c not in df.columns]
+    if missing:
+        raise ValueError(f"Dataset is missing required columns: {missing}")
 
-# FIX: Save as "random_forest_model.pkl" — this is what app.py loads.
-joblib.dump(rf_model, os.path.join(MODEL_DIR, "random_forest_model.pkl"))
-joblib.dump(lr_model, os.path.join(MODEL_DIR, "logistic_regression_model.pkl"))
-joblib.dump(scaler, os.path.join(MODEL_DIR, "scaler.pkl"))
+    X = df[FEATURE_COLUMNS].copy()
+    y = df["Class"].astype(int)
+    print(f"Rows: {len(df)}  |  fraud share: {y.mean():.2%}")
 
-print("\n✅ All models and scaler saved to /models/")
-print("   - random_forest_model.pkl")
-print("   - logistic_regression_model.pkl")
-print("   - scaler.pkl")
->>>>>>> 29a82d4 (Initial commit)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, stratify=y, random_state=random_state
+    )
+
+    scaler = StandardScaler()
+    X_train = X_train.copy()
+    X_test = X_test.copy()
+    X_train[SCALED_COLUMNS] = scaler.fit_transform(X_train[SCALED_COLUMNS])
+    X_test[SCALED_COLUMNS] = scaler.transform(X_test[SCALED_COLUMNS])
+
+    X_fit, y_fit = _maybe_oversample(X_train, y_train, random_state)
+
+    print("\nTraining Random Forest...")
+    rf_model = RandomForestClassifier(
+        n_estimators=n_estimators, max_depth=12, random_state=random_state, n_jobs=-1
+    )
+    rf_model.fit(X_fit, y_fit)
+
+    print("Training Logistic Regression...")
+    lr_model = LogisticRegression(max_iter=1000, random_state=random_state)
+    lr_model.fit(X_fit, y_fit)
+
+    print(f"\nTest-set results ({len(X_test)} rows, stratified 80/20 split, seed {random_state}):")
+    metrics = {
+        "random_forest": evaluate("Random Forest", rf_model, X_test, y_test),
+        "logistic_regression": evaluate("Logistic Regression", lr_model, X_test, y_test),
+    }
+
+    os.makedirs(model_dir, exist_ok=True)
+    joblib.dump(rf_model, os.path.join(model_dir, "random_forest_model.pkl"))
+    joblib.dump(lr_model, os.path.join(model_dir, "logistic_regression_model.pkl"))
+    joblib.dump(scaler, os.path.join(model_dir, "scaler.pkl"))
+    print(f"\nSaved random_forest_model.pkl, logistic_regression_model.pkl and scaler.pkl to {model_dir}")
+    return metrics
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--data", default=DEFAULT_DATA_PATH, help="path to creditcard-style CSV")
+    parser.add_argument("--model-dir", default=DEFAULT_MODEL_DIR, help="where to write .pkl files")
+    args = parser.parse_args()
+    try:
+        train(args.data, args.model_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        sys.exit(f"ERROR: {exc}")
+
+
+if __name__ == "__main__":
+    main()

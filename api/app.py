@@ -1,131 +1,64 @@
-<<<<<<< HEAD
-import sys
+"""Flask REST API for fraud prediction.
+
+Run from the project root::
+
+    python api/app.py              # http://127.0.0.1:5000
+    API_HOST=0.0.0.0 API_PORT=8000 python api/app.py
+
+Environment variables: API_HOST (default 127.0.0.1), API_PORT (default 5000),
+FLASK_DEBUG=1 to enable Flask's debug mode (never use it on a public interface).
+"""
+import logging
 import os
+import sqlite3
+import sys
+
+import joblib
+from flask import Flask, jsonify, request
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(os.path.join(BASE_DIR, "backend"))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
-from flask import Flask, request, jsonify
-import sqlite3
-import joblib
-from feature_engineering import build_feature_vector
-
-MODEL_PATH = os.path.join(BASE_DIR, "models", "fraud_model.pkl")
-SCALER_PATH = os.path.join(BASE_DIR, "models", "scaler.pkl")
-DB_PATH = os.path.join(BASE_DIR, "database", "fraud_system.db")
-
-model = joblib.load(MODEL_PATH)
-scaler = joblib.load(SCALER_PATH)
-
-app = Flask(__name__)
-
-@app.route("/predict", methods=["POST"])
-def predict():
-    data = request.json
-
-    amount = float(data["amount"])
-    time = int(data["time"])
-    customer_id = int(data["customer_id"])
-    location = data.get("location", "India")
-    device = data.get("device", "mobile")
-    is_international = int(data.get("is_international", 0))
-
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    # store transaction
-    cursor.execute("""
-        INSERT INTO transactions (customer_id, amount, transaction_time, location, device, is_international)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (customer_id, amount, time, location, device, is_international))
-
-    txn_id = cursor.lastrowid
-
-    # ML prediction
-    X = build_feature_vector(amount, time)
-    X_scaled = scaler.transform(X)
-
-    prob = float(model.predict_proba(X_scaled)[0][1])
-    label = int(prob >= 0.5)
-
-    # store prediction
-    cursor.execute("""
-        INSERT INTO predictions (transaction_id, fraud_probability, predicted_label, model_version)
-        VALUES (?, ?, ?, ?)
-    """, (txn_id, prob, label, "RF_v1"))
-
-    # alert if fraud
-    if label == 1:
-        cursor.execute("""
-            INSERT INTO alerts (transaction_id, risk_level, status)
-            VALUES (?, ?, ?)
-        """, (txn_id, "HIGH", "OPEN"))
-
-    conn.commit()
-    conn.close()
-
-    return jsonify({
-        "transaction_id": txn_id,
-        "fraud_probability": prob,
-        "fraud": bool(label)
-    })
-if __name__ == "__main__":
-    app.run(debug=True)
-=======
-import os
-import sqlite3
-
-import joblib  # FIX: use joblib consistently (train_model.py uses joblib to save)
-from flask import Flask, jsonify, request
-import sys
-import os
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from backend.feature_engineering import (
+from backend.feature_engineering import (  # noqa: E402
     FEATURE_COLUMNS,
     FEATURE_DISPLAY_NAMES,
     build_feature_vector,
+    classify_risk,
     validate_transaction_features,
 )
+from init_db import init_db  # noqa: E402
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
-DATABASE_DIR = os.path.join(BASE_DIR, "database")
-
 MODEL_PATH = os.path.join(MODELS_DIR, "random_forest_model.pkl")
 SCALER_PATH = os.path.join(MODELS_DIR, "scaler.pkl")
-DB_PATH = os.path.join(DATABASE_DIR, "fraud_system.db")
+DB_PATH = os.path.join(BASE_DIR, "database", "fraud_system.db")
 MODEL_VERSION = "random_forest_model.pkl"
 
+logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 
-# ── FIX: Wrap model loading in try/except so the Flask server starts
-# even when .pkl files are missing, and /health reports the real status.
-try:
-    model = joblib.load(MODEL_PATH)
-    scaler = joblib.load(SCALER_PATH)
-    MODEL_LOAD_ERROR = None
-except FileNotFoundError as e:
-    model = None
-    scaler = None
-    MODEL_LOAD_ERROR = str(e)
+def load_artifacts(model_path=MODEL_PATH, scaler_path=SCALER_PATH):
+    """Load (model, scaler, error). On any failure returns (None, None, message)."""
+    try:
+        return joblib.load(model_path), joblib.load(scaler_path), None
+    except Exception as exc:  # missing file, corrupt pickle, version mismatch ...
+        logger.error("Could not load model artifacts: %s", exc)
+        return None, None, f"{type(exc).__name__}: {exc}"
+
+
+# The server starts even if the models are missing; /health and /predict report it.
+model, scaler, MODEL_LOAD_ERROR = load_artifacts()
 
 
 def get_db_connection():
+    """Open the database, creating it from schema.sql first if it does not exist."""
     if not os.path.exists(DB_PATH):
-        raise FileNotFoundError(f"Database file not found: {DB_PATH}")
+        init_db(DB_PATH)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
-
-
-def classify_risk(probability):
-    if probability < 0.3:
-        return "LOW"
-    if probability < 0.7:
-        return "MEDIUM"
-    return "HIGH"
 
 
 def insert_transaction(conn, validated_payload, device="API_CLIENT"):
@@ -149,8 +82,7 @@ def insert_transaction(conn, validated_payload, device="API_CLIENT"):
 
 
 def insert_prediction(conn, transaction_id, fraud_probability, predicted_label):
-    cursor = conn.cursor()
-    cursor.execute(
+    conn.execute(
         """
         INSERT INTO predictions (
             transaction_id, fraud_probability, predicted_label, model_version
@@ -161,12 +93,8 @@ def insert_prediction(conn, transaction_id, fraud_probability, predicted_label):
 
 
 def insert_alert(conn, transaction_id, risk_level):
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT INTO alerts (transaction_id, risk_level, status)
-        VALUES (?, ?, ?)
-        """,
+    conn.execute(
+        "INSERT INTO alerts (transaction_id, risk_level, status) VALUES (?, ?, ?)",
         (transaction_id, risk_level, "OPEN"),
     )
 
@@ -175,14 +103,11 @@ def generate_prediction(validated_payload):
     feature_vector = build_feature_vector(validated_payload, scaler)
     probability = float(model.predict_proba(feature_vector)[0][1])
     predicted_label = int(model.predict(feature_vector)[0])
-    is_fraud = bool(predicted_label)
-    risk_level = classify_risk(probability)
-
     return {
         "fraud_probability": round(probability, 6),
         "predicted_label": predicted_label,
-        "is_fraud": is_fraud,
-        "risk_level": risk_level,
+        "is_fraud": bool(predicted_label),
+        "risk_level": classify_risk(probability),
     }
 
 
@@ -193,8 +118,7 @@ def process_prediction(validated_payload, device="API_CLIENT"):
     try:
         transaction_id = insert_transaction(conn, validated_payload, device=device)
         insert_prediction(
-            conn, transaction_id,
-            prediction["fraud_probability"], prediction["predicted_label"]
+            conn, transaction_id, prediction["fraud_probability"], prediction["predicted_label"]
         )
         if prediction["is_fraud"]:
             insert_alert(conn, transaction_id, prediction["risk_level"])
@@ -213,27 +137,25 @@ def process_prediction(validated_payload, device="API_CLIENT"):
     }
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# ── Routes ───────────────────────────────────────────────────────────────────
 
 @app.route("/", methods=["GET"])
 def home():
-    # Build a human-readable field reference
-    field_reference = {col: FEATURE_DISPLAY_NAMES.get(col, col) for col in FEATURE_COLUMNS}
     return jsonify({
         "message": "Fraud Detection API is running.",
         "available_routes": {
             "GET /health": "Check API health and model status",
-            "GET /stats":  "Fraud statistics from the database",
-            "POST /predict": "Predict fraud from JSON input",
+            "GET /stats": "Prediction statistics from the database",
+            "POST /predict": "Predict fraud from a JSON body with all 30 features",
         },
-        "required_fields": field_reference,
+        "required_fields": {col: FEATURE_DISPLAY_NAMES.get(col, col) for col in FEATURE_COLUMNS},
     }), 200
 
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
-        "status": "ok" if model is not None else "degraded",
+        "status": "ok" if model is not None and scaler is not None else "degraded",
         "model_loaded": model is not None,
         "scaler_loaded": scaler is not None,
         "database_configured": os.path.exists(DB_PATH),
@@ -244,64 +166,65 @@ def health():
 
 @app.route("/stats", methods=["GET"])
 def stats():
-    """Return fraud statistics aggregated from the database."""
+    """Counts from the database. Fraud figures are based on scored transactions only."""
     try:
         conn = get_db_connection()
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT COUNT(*) FROM transactions")
-        total = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM predictions WHERE predicted_label = 1")
-        fraud_count = cursor.fetchone()[0]
-
-        cursor.execute(
-            "SELECT risk_level, COUNT(*) as cnt FROM alerts GROUP BY risk_level"
-        )
-        risk_breakdown = {row["risk_level"]: row["cnt"] for row in cursor.fetchall()}
-        conn.close()
-
-        fraud_rate = round(fraud_count / total * 100, 2) if total > 0 else 0.0
-        return jsonify({
-            "total_transactions": total,
-            "fraud_detected": fraud_count,
-            "legitimate": total - fraud_count,
-            "fraud_rate_percent": fraud_rate,
-            "alert_breakdown": risk_breakdown,
-        }), 200
-    except FileNotFoundError as exc:
-        return jsonify({"error": str(exc)}), 500
+        try:
+            total_transactions = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+            scored = conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
+            fraud_count = conn.execute(
+                "SELECT COUNT(*) FROM predictions WHERE predicted_label = 1"
+            ).fetchone()[0]
+            risk_breakdown = {
+                row["risk_level"]: row["cnt"]
+                for row in conn.execute(
+                    "SELECT risk_level, COUNT(*) AS cnt FROM alerts GROUP BY risk_level"
+                )
+            }
+        finally:
+            conn.close()
     except sqlite3.Error as exc:
-        return jsonify({"error": f"Database error: {str(exc)}"}), 500
+        logger.exception("Database error in /stats")
+        return jsonify({"error": f"Database error: {exc}"}), 500
+
+    return jsonify({
+        "total_transactions": total_transactions,
+        "predictions_made": scored,
+        "fraud_detected": fraud_count,
+        "legitimate": scored - fraud_count,
+        "fraud_rate_percent": round(fraud_count / scored * 100, 2) if scored else 0.0,
+        "alert_breakdown": risk_breakdown,
+    }), 200
 
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    if model is None:
+    if model is None or scaler is None:
         return jsonify({
-            "error": "Model not loaded. Run train_model.py first.",
+            "error": "Model not loaded. Run `python backend/train_model.py` first.",
             "detail": MODEL_LOAD_ERROR,
         }), 503
 
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return jsonify({"error": "Request body must be valid JSON."}), 400
+
     try:
-        payload = request.get_json(silent=True)
-        if payload is None:
-            return jsonify({"error": "Request body must be valid JSON."}), 400
-
         validated_payload = validate_transaction_features(payload)
-        result = process_prediction(validated_payload, device="API_CLIENT")
-        return jsonify(result), 200
-
+        return jsonify(process_prediction(validated_payload, device="API_CLIENT")), 200
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except FileNotFoundError as exc:
-        return jsonify({"error": str(exc)}), 500
     except sqlite3.Error as exc:
-        return jsonify({"error": f"Database error: {str(exc)}"}), 500
-    except Exception as exc:
-        return jsonify({"error": f"Internal server error: {str(exc)}"}), 500
+        logger.exception("Database error in /predict")
+        return jsonify({"error": f"Database error: {exc}"}), 500
+    except Exception:
+        logger.exception("Unexpected error in /predict")
+        return jsonify({"error": "Internal server error."}), 500
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
->>>>>>> 29a82d4 (Initial commit)
+    app.run(
+        host=os.environ.get("API_HOST", "127.0.0.1"),
+        port=int(os.environ.get("API_PORT", "5000")),
+        debug=os.environ.get("FLASK_DEBUG", "0") == "1",
+    )

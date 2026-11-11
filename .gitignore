@@ -2,12 +2,14 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
 
 venv/
+.venv/
 .env
 
+# Generated at runtime / by training (see README):
 database/fraud_system.db
-
 *.pkl
 
 .DS_Store

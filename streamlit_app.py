@@ -1,10 +1,21 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import pickle
-import plotly.express as px
-import random
+import os
+import secrets
+import sys
 from datetime import datetime, timedelta
+
+import joblib
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+from backend.feature_engineering import build_feature_vector, classify_risk  # noqa: E402
+
+MODELS_DIR = os.path.join(BASE_DIR, "models")
 
 st.set_page_config(
     page_title="Fraud Detection System",
@@ -50,114 +61,92 @@ div[data-testid="metric-container"] {
 
 @st.cache_resource
 def load_models():
-    model_paths = [
-        "models/random_forest_model.pkl",
-        "models/randomforestmodel.pkl",
+    """Load the trained model and scaler (paths are relative to this file, not the CWD)."""
+    model_candidates = [
         "random_forest_model.pkl",
-        "randomforestmodel.pkl",
-        "models/logistic_regression_model.pkl",
-        "models/logisticregressionmodel.pkl"
+        "logistic_regression_model.pkl",
     ]
+    scaler_path = os.path.join(MODELS_DIR, "scaler.pkl")
 
-    scaler_paths = [
-        "models/scaler.pkl",
-        "scaler.pkl"
-    ]
+    model = scaler = used_model_path = None
+    errors = []
 
-    model = None
-    scaler = None
-    used_model_path = None
-    used_scaler_path = None
-
-    for path in model_paths:
+    for name in model_candidates:
+        path = os.path.join(MODELS_DIR, name)
+        if not os.path.exists(path):
+            continue
         try:
-            with open(path, "rb") as f:
-                model = pickle.load(f)
+            model = joblib.load(path)
             used_model_path = path
             break
-        except:
-            pass
+        except Exception as exc:
+            errors.append(f"{name}: {type(exc).__name__}: {exc}")
 
-    for path in scaler_paths:
+    if os.path.exists(scaler_path):
         try:
-            with open(path, "rb") as f:
-                scaler = pickle.load(f)
-            used_scaler_path = path
-            break
-        except:
-            pass
+            scaler = joblib.load(scaler_path)
+        except Exception as exc:
+            errors.append(f"scaler.pkl: {type(exc).__name__}: {exc}")
 
     if model is None or scaler is None:
-        st.error("❌ Model files not found.")
-        st.info("Keep files like this:")
-        st.code(
-"""fraud_detection_system/
-├── streamlit_app.py
-├── models/
-│   ├── random_forest_model.pkl
-│   └── scaler.pkl""")
-        st.info("Or run this from project root:")
-        st.code("python src/model_training.py")
+        st.error("❌ Model files could not be loaded.")
+        for err in errors:
+            st.warning(err)
+        st.info("Train the models from the project root, then reload this page:")
+        st.code("python backend/train_model.py")
         st.stop()
 
-    return model, scaler, used_model_path, used_scaler_path
+    return model, scaler, used_model_path, scaler_path
 
 
 def generate_transactions(n=500):
-    np.random.seed(42)
-    random.seed(42)
+    """Build SIMULATED demo transactions for the dashboard pages.
+
+    These rows are random, and ``Is_Fraud`` comes from simple rules plus noise -
+    it is not produced by the trained model. Use "Manual Prediction" to score a
+    transaction with the real model.
+    """
+    rng = np.random.default_rng(42)
     now = datetime.now()
     transactions = []
 
     for idx in range(n):
-        tx_time = idx * 120 + random.randint(0, 60)
-        amount = round(np.random.lognormal(mean=4.0, sigma=1.0), 2)
-        v1 = np.random.normal(0, 1.5)
-        v2 = np.random.normal(0, 1.2)
-
-        extra_features = [float(np.random.normal(0, 1)) for _ in range(26)]
+        tx_time = idx * 120 + int(rng.integers(0, 61))
+        amount = round(float(rng.lognormal(mean=4.0, sigma=1.0)), 2)
+        v1 = float(rng.normal(0, 1.5))
+        v2 = float(rng.normal(0, 1.2))
+        extra_features = rng.normal(0, 1, size=26)
 
         risk_seed = (
-            (amount > 800) or
-            (v1 < -3.0) or
-            (abs(v2) > 2.5) or
-            (random.random() < 0.04)
+            (amount > 800)
+            or (v1 < -3.0)
+            or (abs(v2) > 2.5)
+            or (rng.random() < 0.04)
         )
-        is_fraud = 1 if risk_seed else 0
 
         transactions.append({
-            'Transaction_ID': f'TXN{idx + 1}',
-            'Time': float(tx_time),
-            'Amount': float(amount),
-            'V1': float(v1),
-            'V2': float(v2),
-            **{f'V{i}': v for i, v in enumerate(extra_features, 3)},
-            'Is_Fraud': int(is_fraud),
-            'Timestamp': now - timedelta(seconds=tx_time)
+            "Transaction_ID": f"TXN{idx + 1}",
+            "Time": float(tx_time),
+            "Amount": float(amount),
+            "V1": v1,
+            "V2": v2,
+            **{f"V{i}": float(v) for i, v in enumerate(extra_features, 3)},
+            "Is_Fraud": int(risk_seed),
+            "Timestamp": now - timedelta(seconds=tx_time),
         })
 
     return pd.DataFrame(transactions)
 
 
 def predict_fraud(model, scaler, transaction):
-    feature_row = [transaction["Time"]]
+    """Score one transaction dict with the trained model; returns (probability, label)."""
+    row = build_feature_vector(transaction, scaler)
+    prob = float(model.predict_proba(row)[0][1])
+    return prob, int(prob >= 0.5)
 
-    for i in range(1, 29):
-        feature_row.append(transaction[f"V{i}"])
 
-    feature_row.append(transaction["Amount"])
-
-    row = pd.DataFrame([feature_row], columns=["Time"] + [f"V{i}" for i in range(1, 29)] + ["Amount"])
-    row[["Time", "Amount"]] = scaler.transform(row[["Time", "Amount"]])
-
-    if hasattr(model, "predict_proba"):
-        prob = float(model.predict_proba(row)[0][1])
-    else:
-        pred = int(model.predict(row)[0])
-        prob = 1.0 if pred == 1 else 0.0
-
-    pred = 1 if prob >= 0.5 else 0
-    return prob, pred
+def new_captcha_code():
+    return str(secrets.randbelow(9000) + 1000)
 
 
 model, scaler, model_path, scaler_path = load_models()
@@ -166,7 +155,7 @@ if "transactions" not in st.session_state:
     st.session_state.transactions = generate_transactions()
 
 if "captcha_code" not in st.session_state:
-    st.session_state.captcha_code = str(random.randint(1000, 9999))
+    st.session_state.captcha_code = new_captcha_code()
 
 if "verified" not in st.session_state:
     st.session_state.verified = False
@@ -179,13 +168,14 @@ page = st.sidebar.radio(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.caption(f"Model: {model_path}")  # local path shown to help debugging
-st.sidebar.caption(f"Scaler: {scaler_path}")  # local path shown to help debugging
+st.sidebar.caption(f"Model: {os.path.relpath(model_path, BASE_DIR)}")
+st.sidebar.caption(f"Scaler: {os.path.relpath(scaler_path, BASE_DIR)}")
 
 
 if page == "Dashboard":
     st.title("🛡️ Fraud Detection Dashboard")
-    st.caption("Real-time fraud monitoring view based on your trained model setup.[file:1][file:2]")
+    st.caption("Demo dashboard over simulated transactions (not live data and not scored by the model). "
+               "Use Manual Prediction to run the trained model.")
 
     df = st.session_state.transactions
     total = len(df)
@@ -214,7 +204,7 @@ if page == "Dashboard":
             color_discrete_map={"Legitimate": "#22c55e", "Fraud": "#ef4444"},
             title="Transaction Split"
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig)
 
     with col2:
         chart_df = df.copy()
@@ -227,7 +217,7 @@ if page == "Dashboard":
             markers=True,
             title="Fraud Rate by Hour Bucket"
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig)
 
 
 elif page == "Transactions":
@@ -248,8 +238,7 @@ elif page == "Transactions":
 
     display_cols = ["Transaction_ID", "Timestamp", "Time", "Amount", "V1", "V2", "Is_Fraud"]
     st.dataframe(
-        df[display_cols].sort_values("Timestamp", ascending=False).head(rows_to_show),
-        use_container_width=True
+        df[display_cols].sort_values("Timestamp", ascending=False).head(rows_to_show)
     )
 
 
@@ -275,7 +264,7 @@ elif page == "Alerts":
 
 elif page == "Manual Prediction":
     st.title("🔍 Manual Prediction")
-    st.caption("The model expects features in the order Time, V1-V28, Amount, and only Time and Amount are scaled.[file:203]")
+    st.caption("The model expects features in the order Time, V1-V28, Amount; only Time and Amount are scaled.")
 
     if not st.session_state.verified:
         st.warning("Verification required before prediction.")
@@ -313,7 +302,7 @@ elif page == "Manual Prediction":
 
         with col2:
             if st.button("Refresh Code"):
-                st.session_state.captcha_code = str(random.randint(1000, 9999))
+                st.session_state.captcha_code = new_captcha_code()
                 st.rerun()
 
     else:
@@ -355,8 +344,7 @@ elif page == "Manual Prediction":
                     else:
                         st.success(f"✅ Legitimate Transaction | Probability: {prob:.4f}")
 
-                    risk = "HIGH" if prob >= 0.8 else "MEDIUM" if prob >= 0.5 else "LOW"
-                    st.info(f"Risk Level: {risk}")
+                    st.info(f"Risk Level: {classify_risk(prob)}")
 
                 except Exception as e:
                     st.error(f"Prediction failed: {e}")
@@ -378,11 +366,11 @@ elif page == "Analytics":
             title="Amount vs V1",
             color_discrete_map={"0": "#22c55e", "1": "#ef4444"}
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig)
 
     with col2:
         bins = pd.cut(df["Amount"], bins=10)
-        grp = df.groupby(bins)["Is_Fraud"].mean().reset_index()
+        grp = df.groupby(bins, observed=True)["Is_Fraud"].mean().reset_index()
         grp["AmountRange"] = grp["Amount"].astype(str)
         fig = px.bar(
             grp,
@@ -390,11 +378,12 @@ elif page == "Analytics":
             y="Is_Fraud",
             title="Fraud Rate by Amount Range"
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig)
 
 
 st.markdown("---")
 st.caption(
-    "Project uses Random Forest as the best model in the provided project documents, "
-    "with feature order Time, V1-V28, Amount and StandardScaler applied to Time and Amount.[file:1][file:203]"
+    "Predictions use the Random Forest model with feature order Time, V1-V28, Amount "
+    "and a StandardScaler applied to Time and Amount. Dashboard, Transactions, Alerts and "
+    "Analytics pages show simulated demo data."
 )
